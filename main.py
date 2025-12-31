@@ -1,77 +1,100 @@
 import os
-import requests
+import datetime
+import yfinance as yf
 import feedparser
-import google.generativeai as genai
-from datetime import datetime
+from openai import OpenAI
+from notion_client import Client
 
 # --- 設定 ---
-# RSSのURL（ScienceDirect）
-RSS_URL = "https://rss.sciencedirect.com/publication/science/0304405X"
-# 過去何時間以内の記事を対象にするか（定期実行の間隔に合わせる）
-CHECK_HOURS = 24 
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN")
+NOTION_PAGE_ID = os.environ.get("NOTION_PAGE_ID")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 
-# --- APIキーの準備 ---
-DISCORD_WEBHOOK_URL = os.environ.get("DISCORD_WEBHOOK_URL")
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+# --- 1. データ取得関数 ---
+def get_market_data():
+    # 日経平均とドル円を取得
+    tickers = {"^N225": "日経平均", "JPY=X": "USD/JPY"}
+    data_text = "【本日の数値データ】\n"
+    
+    for ticker, name in tickers.items():
+        stock = yf.Ticker(ticker)
+        hist = stock.history(period="1d")
+        if not hist.empty:
+            close_price = hist["Close"].iloc[-1]
+            data_text += f"{name}: {close_price:.2f}\n"
+    
+    # ニュースのヘッドラインを取得（例: Yahoo News Business RSSなど）
+    # ※ここでは例としてReutersのRSSを使用（URLは適宜変更可能）
+    rss_url = "https://assets.publishing.service.gov.uk/government/uploads/system/uploads/attachment_data/file/1133989/business-finance.xml" # 仮のURL、実際は有効なニュースRSSを指定
+    # 安定稼働のため、今回は数値データのみでAIに語らせる構成にします（RSSは不安定な場合があるため）
+    # 必要であれば feedparser.parse(rss_url) を追加してください。
+    
+    return data_text
 
-def summarize_with_gemini(title, abstract):
-    """Geminiを使って論文を要約する"""
-    genai.configure(api_key=GOOGLE_API_KEY)
-    model = genai.GenerativeModel('gemini-1.5-flash') # コスパの良いモデルを指定
-
+# --- 2. AI要約関数 ---
+def generate_summary(market_data):
+    client = OpenAI(api_key=OPENAI_API_KEY)
+    
     prompt = f"""
-    あなたは金融データサイエンスの専門家です。
-    以下の論文データを元に、Discord投稿用の日本語要約を作成してください。
+    あなたはプロの金融アナリストです。以下の市場データを基に、今日の日本市場の動向を簡潔にまとめてください。
     
-    【入力データ】
-    Title: {title}
-    Abstract: {abstract}
+    {market_data}
     
-    【指示】
-    1. **論文名**: 「###」を使って小見出しサイズにしてください。
-    2. **要約**: 引用記号（>）は使わずにプレーンテキストで3行程度で要約してください。
-    3. 出力にはタイトルと要約のみを含めてください（リンクは別途付与するため不要）。
+    要件:
+    - 300文字程度
+    - ビジネスマン向けに簡潔に
+    - トーンは「です・ます」調
     """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini", # コストパフォーマンスの良いモデル
+        messages=[{"role": "user", "content": prompt}]
+    )
+    return response.choices[0].message.content
+
+# --- 3. Notion投稿関数 ---
+def create_notion_page(summary_text):
+    notion = Client(auth=NOTION_TOKEN)
+    today = datetime.date.today().strftime("%Y-%m-%d")
     
-    try:
-        response = model.generate_content(prompt)
-        return response.text
-    except Exception as e:
-        print(f"Gemini Error: {e}")
-        return "要約の作成に失敗しました。"
+    notion.pages.create(
+        parent={"page_id": NOTION_PAGE_ID},
+        properties={
+            "title": {
+                "title": [{"text": {"content": f"{today} 市場サマリー"}}]
+            }
+        },
+        children=[
+            {
+                "object": "block",
+                "type": "heading_2",
+                "heading_2": {
+                    "rich_text": [{"text": {"content": "本日の概況"}}]
+                }
+            },
+            {
+                "object": "block",
+                "type": "paragraph",
+                "paragraph": {
+                    "rich_text": [{"text": {"content": summary_text}}]
+                }
+            }
+        ]
+    )
 
-def send_discord(content):
-    """Discordにメッセージを送信する"""
-    if not DISCORD_WEBHOOK_URL:
-        print("Discord Webhook URLが設定されていません")
-        return
-
-    data = {"content": content}
-    requests.post(DISCORD_WEBHOOK_URL, json=data)
-
-def main():
-    print("RSSを取得中...")
-    feed = feedparser.parse(RSS_URL)
-    
-    # 記事を新しい順に処理（ここでは最新3件に制限するなど調整可能）
-    for entry in feed.entries[:3]:
-        # 簡易的な重複防止ロジック（発行日などで判断も可能だが今回は簡易化）
-        # 本来はデータベース等で「送信済みID」を管理するのがベスト
-        
-        title = entry.title
-        link = entry.link
-        abstract = getattr(entry, 'summary', 'No abstract available.')
-        
-        print(f"処理中: {title}")
-        
-        # Geminiで要約
-        summary_text = summarize_with_gemini(title, abstract)
-        
-        # メッセージの構築
-        message = f"{summary_text}\n\n**Link:** {link}"
-        
-        # Discordへ送信
-        send_discord(message)
-
+# --- メイン処理 ---
 if __name__ == "__main__":
-    main()
+    try:
+        print("データ取得中...")
+        data = get_market_data()
+        
+        print("AI要約生成中...")
+        summary = generate_summary(data)
+        
+        print("Notion投稿中...")
+        create_notion_page(summary)
+        
+        print("完了しました。")
+    except Exception as e:
+        print(f"エラーが発生しました: {e}")
+        exit(1)
