@@ -2,3 +2,4 @@ yfinance==0.2.33
 openai
 notion-client
 feedparser
+typing_extensions
