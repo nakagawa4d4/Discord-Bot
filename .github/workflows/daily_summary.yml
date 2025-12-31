@@ -1,0 +1,32 @@
+name: Daily Market Summary
+
+on:
+  schedule:
+    # UTCで指定します。日本時間17:00は UTC 8:00 です。
+    # 平日（月～金）のみ実行する場合:
+    - cron: '0 8 * * 1-5'
+  workflow_dispatch: # 手動実行ボタンも有効化
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+
+      - name: Run script
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_PAGE_ID: ${{ secrets.NOTION_PAGE_ID }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: python main.py
