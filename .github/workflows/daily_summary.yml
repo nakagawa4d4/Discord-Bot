@@ -22,7 +22,7 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
+          pip install "yfinance==0.2.33" openai notion-client feedparser
 
       - name: Run script
         env:
